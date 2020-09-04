@@ -193,6 +193,12 @@ class BatchSpawnerBase(Spawner):
         """The command which is substituted inside of the batch script"""
         return ' '.join([self.batchspawner_singleuser_cmd] + self.cmd + self.get_args())
 
+    def connect_to_job(self):
+        """This command ensures the port of the singleuser server is reachable from the
+        Batchspawner machine. By default, it does nothing, i.e. direct connectivity
+        is assumed.
+        """
+
     async def run_command(self, cmd, input=None, env=None):
         proc = await asyncio.create_subprocess_shell(cmd, env=env,
                                                     stdin=asyncio.subprocess.PIPE,
@@ -228,6 +234,36 @@ class BatchSpawnerBase(Spawner):
 
         out = out.decode().strip()
         return out
+
+    # List of running background processes, e.g. used by connect_to_job.
+    background_processes = []
+
+    async def _async_wait_process(sleep_time):
+        """Asynchronously sleeping process for delayed checks"""
+        await asyncio.sleep(sleep_time)
+
+    async def run_background_command(self, cmd, startup_check_delay=1, input=None, env=None):
+        """Runs the given background command, adds it to background_processes,
+        and checks if the command is still running after startup_check_delay."""
+        background_process = run_command(self, cmd, input, env)
+        success_check_delay = _async_wait_process(startup_check_delay)
+
+        # Start up both the success check process and the actual process.
+        done, pending = await asyncio.wait([background_process, success_check_delay], return_when=asyncio.FIRST_COMPLETED)
+
+        # If the success check process is the one which exited first, all is good, else fail.
+        if list(done)[0]._coro == success_check_delay:
+            background_processes.append(list(pending)[0])
+            return
+        else:
+            self.log.error("Background command %s exited early!")
+            gather = asyncio.gather(*pending)
+            gather.cancel()
+            try:
+                await gather
+            except asyncio.CancelledError:
+                pass
+            # Something is wrong! Propagate exception?
 
     async def _get_batch_script(self, **subvars):
         """Format batch script from vars"""
@@ -772,6 +808,13 @@ Queue
     def cmd_formatted_for_batch(self):
         return super(CondorSpawner,self).cmd_formatted_for_batch().replace('"','""').replace("'","''")
 
+    def connect_to_job(self):
+        run_background_command("condor_ssh_to_job -ssh \"ssh -L %d:localhost:%d -oExitOnForwardFailure=yes\" {job_id}" % self.port, self.port)
+        # error handling!
+
+    def state_gethost(self):
+        """This always returns localhost since connect_to_job forwards the singleuser server port from the spawned job"""
+        return "localhost"
 
 class LsfSpawner(BatchSpawnerBase):
     '''A Spawner that uses IBM's Platform Load Sharing Facility (LSF) to launch notebooks.'''
