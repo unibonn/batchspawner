@@ -193,7 +193,7 @@ class BatchSpawnerBase(Spawner):
         """The command which is substituted inside of the batch script"""
         return ' '.join([self.batchspawner_singleuser_cmd] + self.cmd + self.get_args())
 
-    def connect_to_job(self):
+    async def connect_to_job(self):
         """This command ensures the port of the singleuser server is reachable from the
         Batchspawner machine. By default, it does nothing, i.e. direct connectivity
         is assumed.
@@ -238,22 +238,22 @@ class BatchSpawnerBase(Spawner):
     # List of running background processes, e.g. used by connect_to_job.
     background_processes = []
 
-    async def _async_wait_process(sleep_time):
+    async def _async_wait_process(self, sleep_time):
         """Asynchronously sleeping process for delayed checks"""
         await asyncio.sleep(sleep_time)
 
     async def run_background_command(self, cmd, startup_check_delay=1, input=None, env=None):
         """Runs the given background command, adds it to background_processes,
         and checks if the command is still running after startup_check_delay."""
-        background_process = run_command(self, cmd, input, env)
-        success_check_delay = _async_wait_process(startup_check_delay)
+        background_process = self.run_command(cmd, input, env)
+        success_check_delay = self._async_wait_process(startup_check_delay)
 
         # Start up both the success check process and the actual process.
         done, pending = await asyncio.wait([background_process, success_check_delay], return_when=asyncio.FIRST_COMPLETED)
 
         # If the success check process is the one which exited first, all is good, else fail.
         if list(done)[0]._coro == success_check_delay:
-            background_processes.append(list(pending)[0])
+            self.background_processes.append(list(pending)[0])
             return
         else:
             self.log.error("Background command %s exited early!")
@@ -432,6 +432,8 @@ class BatchSpawnerBase(Spawner):
         self.log.info("Notebook server job {0} started at {1}:{2}".format(
                         self.job_id, self.ip, self.port)
             )
+
+        await self.connect_to_job()
 
         return self.ip, self.port
 
@@ -808,8 +810,13 @@ Queue
     def cmd_formatted_for_batch(self):
         return super(CondorSpawner,self).cmd_formatted_for_batch().replace('"','""').replace("'","''")
 
-    def connect_to_job(self):
-        run_background_command("condor_ssh_to_job -ssh \"ssh -L %d:localhost:%d -oExitOnForwardFailure=yes\" {job_id}" % self.port, self.port)
+    async def connect_to_job(self):
+        connect_command = "condor_ssh_to_job -ssh \"ssh -L %d:localhost:%d -oExitOnForwardFailure=yes\" {job_id}" % (self.port, self.port)
+        subvars = self.get_req_subvars()
+        subvars['job_id'] = self.job_id
+        cmd = ' '.join((format_template(self.exec_prefix, **subvars),
+                        format_template(connect_command, **subvars)))
+        await self.run_background_command(cmd)
         # error handling!
 
     def state_gethost(self):
