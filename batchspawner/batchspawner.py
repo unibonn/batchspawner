@@ -165,6 +165,12 @@ class BatchSpawnerBase(Spawner):
              "specification."
         ).tag(config=True)
 
+    connect_to_job_cmd = Unicode('',
+        help="Command to connect to running batch job and forward the port "
+             "of the running notebook to the Hub. If empty, direct connectivity is assumed. "
+             "Uses self.job_id as {job_id} and the self.port as {port}."
+        ).tag(config=True)
+
     # Raw output of job submission command unless overridden
     job_id = Unicode()
 
@@ -198,6 +204,13 @@ class BatchSpawnerBase(Spawner):
         Batchspawner machine. By default, it does nothing, i.e. direct connectivity
         is assumed.
         """
+        subvars = self.get_req_subvars()
+        subvars['job_id'] = self.job_id
+        subvars['port'] = self.port
+        cmd = ' '.join((format_template(self.exec_prefix, **subvars),
+                        format_template(self.connect_to_job_cmd, **subvars)))
+        await self.run_background_command(cmd)
+        # error handling!
 
     async def run_command(self, cmd, input=None, env=None):
         proc = await asyncio.create_subprocess_shell(cmd, env=env,
@@ -433,7 +446,8 @@ class BatchSpawnerBase(Spawner):
                         self.job_id, self.ip, self.port)
             )
 
-        await self.connect_to_job()
+        if self.connect_to_job_cmd:
+            await self.connect_to_job()
 
         return self.ip, self.port
 
@@ -793,6 +807,7 @@ Queue
     # outputs job data XML string
     batch_query_cmd = Unicode('condor_q {job_id} -format "%s, " JobStatus -format "%s" RemoteHost -format "\n" True').tag(config=True)
     batch_cancel_cmd = Unicode('condor_rm {job_id}').tag(config=True)
+    connect_to_job_cmd = Unicode("condor_ssh_to_job -ssh \"ssh -L {port}:localhost:{port} -oExitOnForwardFailure=yes\" {job_id}").tag(config=True)
     # job status: 1 = pending, 2 = running
     state_pending_re = Unicode(r'^1,').tag(config=True)
     state_running_re = Unicode(r'^2,').tag(config=True)
@@ -809,15 +824,6 @@ Queue
 
     def cmd_formatted_for_batch(self):
         return super(CondorSpawner,self).cmd_formatted_for_batch().replace('"','""').replace("'","''")
-
-    async def connect_to_job(self):
-        connect_command = "condor_ssh_to_job -ssh \"ssh -L %d:localhost:%d -oExitOnForwardFailure=yes\" {job_id}" % (self.port, self.port)
-        subvars = self.get_req_subvars()
-        subvars['job_id'] = self.job_id
-        cmd = ' '.join((format_template(self.exec_prefix, **subvars),
-                        format_template(connect_command, **subvars)))
-        await self.run_background_command(cmd)
-        # error handling!
 
     def state_gethost(self):
         """This always returns localhost since connect_to_job forwards the singleuser server port from the spawned job"""
