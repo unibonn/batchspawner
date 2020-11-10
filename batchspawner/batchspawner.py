@@ -262,21 +262,36 @@ class BatchSpawnerBase(Spawner):
         success_check_delay = self._async_wait_process(startup_check_delay)
 
         # Start up both the success check process and the actual process.
-        done, pending = await asyncio.wait([background_process, success_check_delay], return_when=asyncio.FIRST_COMPLETED)
+        try:
+            done, pending = await asyncio.wait([background_process, success_check_delay], return_when=asyncio.FIRST_COMPLETED)
+        except:
+            self.log.error("one task has finished...")
+            self.log.error("Finished task: %s", list(done)[0]._coro)
+            self.log.error("Still pending task: %s", list(pending)[0]._coro)
 
         # If the success check process is the one which exited first, all is good, else fail.
         if list(done)[0]._coro == success_check_delay:
             self.background_processes.append(list(pending)[0])
             return
         else:
-            self.log.error("Background command %s exited early!")
-            gather = asyncio.gather(*pending)
-            gather.cancel()
+            self.log.error("Background command exited early: %s" % cmd)
+            gather_pending = asyncio.gather(*pending)
+            gather_pending.cancel()
             try:
-                await gather
+                self.log.error("awaiting gather_pending")
+                await gather_pending
             except asyncio.CancelledError:
+                self.log.error("we have entered raise, passing on...")
                 pass
             # Something is wrong! Propagate exception?
+
+            # Retrieve exception from "done" process.
+            try:
+                gather_done = asyncio.gather(*done)
+                await gather_done
+            except:
+                self.log.error("exception in gather_done")
+                raise RuntimeError('{} failed!'.format(cmd))
 
     async def _get_batch_script(self, **subvars):
         """Format batch script from vars"""
