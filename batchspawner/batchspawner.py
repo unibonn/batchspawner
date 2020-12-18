@@ -210,7 +210,6 @@ class BatchSpawnerBase(Spawner):
         cmd = ' '.join((format_template(self.exec_prefix, **subvars),
                         format_template(self.connect_to_job_cmd, **subvars)))
         await self.run_background_command(cmd)
-        # error handling!
 
     async def run_command(self, cmd, input=None, env=None):
         proc = await asyncio.create_subprocess_shell(cmd, env=env,
@@ -225,18 +224,25 @@ class BatchSpawnerBase(Spawner):
         try:
             out, eout = await proc.communicate(input=inbytes)
         except:
-            self.log.debug("Exception raised when trying to run command: %s" % command)
+            self.log.debug("Exception raised when trying to run command: %s" % cmd)
             proc.kill()
-            self.log.debug("Running command failed done kill")
-            out, eout = await proc.communicate()
-            out = out.decode.strip()
-            eout = eout.decode.strip()
-            self.log.error("Subprocess returned exitcode %s" % proc.returncode)
-            self.log.error('Stdout:')
-            self.log.error(out)
-            self.log.error('Stderr:')
-            self.log.error(eout)
-            raise RuntimeError('{} exit status {}: {}'.format(cmd, proc.returncode, eout))
+            self.log.debug("Running command failed, killed process.")
+            try:
+                out, eout = await asyncio.wait_for(proc.communicate(), timeout=2)
+                out = out.decode().strip()
+                eout = eout.decode().strip()
+                self.log.error("Subprocess returned exitcode %s" % proc.returncode)
+                self.log.error('Stdout:')
+                self.log.error(out)
+                self.log.error('Stderr:')
+                self.log.error(eout)
+                raise RuntimeError('{} exit status {}: {}'.format(cmd, proc.returncode, eout))
+            except asyncio.TimeoutError:
+                self.log.error('Encountered timeout trying to clean up command, process probably killed already: %s' % cmd)
+                return ""
+            except:
+                self.log.error('Encountered exception trying to clean up command: %s' % cmd)
+                raise
         else:
             eout = eout.decode().strip()
             err = proc.returncode
@@ -262,35 +268,30 @@ class BatchSpawnerBase(Spawner):
         success_check_delay = self._async_wait_process(startup_check_delay)
 
         # Start up both the success check process and the actual process.
-        try:
-            done, pending = await asyncio.wait([background_process, success_check_delay], return_when=asyncio.FIRST_COMPLETED)
-        except:
-            self.log.error("one task has finished...")
-            self.log.error("Finished task: %s", list(done)[0]._coro)
-            self.log.error("Still pending task: %s", list(pending)[0]._coro)
+        done, pending = await asyncio.wait([background_process, success_check_delay], return_when=asyncio.FIRST_COMPLETED)
 
         # If the success check process is the one which exited first, all is good, else fail.
         if list(done)[0]._coro == success_check_delay:
-            self.background_processes.append(list(pending)[0])
-            return
+            background_task = list(pending)[0]
+            self.background_processes.append(background_task)
+            return background_task
         else:
             self.log.error("Background command exited early: %s" % cmd)
             gather_pending = asyncio.gather(*pending)
             gather_pending.cancel()
             try:
-                self.log.error("awaiting gather_pending")
+                self.log.debug("Cancelling pending success check task...")
                 await gather_pending
             except asyncio.CancelledError:
-                self.log.error("we have entered raise, passing on...")
+                self.log.debug("Cancel was successful.")
                 pass
-            # Something is wrong! Propagate exception?
 
             # Retrieve exception from "done" process.
             try:
                 gather_done = asyncio.gather(*done)
                 await gather_done
             except:
-                self.log.error("exception in gather_done")
+                self.log.debug("Retrieving exception from failed background task...")
                 raise RuntimeError('{} failed!'.format(cmd))
 
     async def _get_batch_script(self, **subvars):
@@ -320,6 +321,27 @@ class BatchSpawnerBase(Spawner):
             self.job_id = ''
         return self.job_id
 
+    def background_tasks_ok(self):
+        # Check background processes.
+        if self.background_processes:
+            self.log.debug('Checking background processes...')
+            for background_process in self.background_processes:
+                if background_process.done():
+                    self.log.debug('Found a background process in state "done"...')
+                    try:
+                        background_exception = background_process.exception()
+                    except asyncio.CancelledError:
+                        self.log.error('Background process was cancelled!')
+                    if background_exception:
+                        self.log.error('Background process exited with an exception:')
+                        self.log.error(background_exception)
+                    self.log.error('At least one background process finished!')
+                    return False
+                else:
+                    self.log.debug('Found a not-yet-done background process...')
+            self.log.debug('All background processes still running.')
+        return True
+
     # Override if your batch system needs something more elaborate to read the job status
     batch_query_cmd = Unicode('',
         help="Command to run to read job status. Formatted using req_xyz traits as {xyz} "
@@ -331,6 +353,7 @@ class BatchSpawnerBase(Spawner):
             # job not running
             self.job_status = ''
             return self.job_status
+
         subvars = self.get_req_subvars()
         subvars['job_id'] = self.job_id
         cmd = ' '.join((format_template(self.exec_prefix, **subvars),
@@ -355,6 +378,29 @@ class BatchSpawnerBase(Spawner):
         cmd = ' '.join((format_template(self.exec_prefix, **subvars),
                         format_template(self.batch_cancel_cmd, **subvars)))
         self.log.info('Cancelling job ' + self.job_id + ': ' + cmd)
+
+        if self.background_processes:
+            self.log.debug('Job cancelled, cancelling background processes...')
+            for background_process in self.background_processes:
+                if not background_process.cancelled():
+                    try:
+                        background_process.cancel()
+                    except:
+                        self.log.error('Encountered an exception cancelling background process...')
+                    self.log.debug('Cancelled background process, waiting for it to finish...')
+                    try:
+                        await asyncio.wait([background_process])
+                    except asyncio.CancelledError:
+                        self.log.error('Successfully cancelled background process.')
+                        pass
+                    except:
+                        self.log.error('Background process exited with another exception!')
+                        raise
+                else:
+                    self.log.debug('Background process already cancelled...')
+        self.background_processes.clear()
+        self.log.debug('All background processes cancelled.')
+
         await self.run_command(cmd)
 
     def load_state(self, state):
@@ -399,6 +445,13 @@ class BatchSpawnerBase(Spawner):
         if self.job_id is not None and len(self.job_id) > 0:
             await self.read_job_state()
             if self.state_isrunning() or self.state_ispending():
+                if not self.background_tasks_ok():
+                    self.log.debug('Going to stop job, since background tasks are not ok!')
+                    await self.stop(now=True)
+                    await self.read_job_state()
+                    if not (self.state_isrunning() or self.state_ispending()):
+                        self.clear_state()
+                        return 1
                 return None
             else:
                 self.clear_state()
