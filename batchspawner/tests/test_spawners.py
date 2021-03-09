@@ -472,10 +472,12 @@ def run_typical_slurm_spawner(db, io_loop,
 
 
 def test_condor(db, io_loop):
+    global testhost
     spawner_kwargs = {
         'req_nprocs': '5',
         'req_memory': '5678',
         'req_options': 'some_option_asdf',
+        'connect_to_job_cmd': '',
         }
     batch_script_re_list = [
         re.compile(r'exec batchspawner-singleuser singleuser_command'),
@@ -492,9 +494,12 @@ def test_condor(db, io_loop):
         (re.compile(r'sudo.*condor_q'),   ''),
         ]
     from .. import CondorSpawner
+    testhost_orig = testhost
+    testhost = 'localhost'
     run_spawner_script(db, io_loop, CondorSpawner, script,
                        batch_script_re_list=batch_script_re_list,
                        spawner_kwargs=spawner_kwargs)
+    testhost = testhost_orig
 
 
 def test_lfs(db, io_loop):
