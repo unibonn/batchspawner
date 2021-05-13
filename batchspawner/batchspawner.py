@@ -928,8 +928,11 @@ Queue
         return super(CondorSpawner,self).cmd_formatted_for_batch().replace('"','""').replace("'","''")
 
     def state_gethost(self):
-        """This always returns localhost since connect_to_job forwards the singleuser server port from the spawned job"""
-        return "localhost"
+        """Returns localhost if connect_to_job is used, as this forwards the singleuser server port from the spawned job"""
+        if self.connect_to_job_cmd:
+            return "localhost"
+        else:
+            return super(CondorSpawner,self).state_gethost()
 
 class LsfSpawner(BatchSpawnerBase):
     '''A Spawner that uses IBM's Platform Load Sharing Facility (LSF) to launch notebooks.'''
