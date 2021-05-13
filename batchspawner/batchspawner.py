@@ -540,13 +540,14 @@ class BatchSpawnerBase(Spawner):
             # store on user for pre-jupyterhub-0.7:
             self.user.server.port = self.port
             self.user.server.ip = self.ip
+
+        if self.connect_to_job_cmd:
+            await self.connect_to_job()
+
         self.db.commit()
         self.log.info("Notebook server job {0} started at {1}:{2}".format(
                         self.job_id, self.ip, self.port)
             )
-
-        if self.connect_to_job_cmd:
-            await self.connect_to_job()
 
         return self.ip, self.port
 
